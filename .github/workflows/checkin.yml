@@ -96,3 +96,47 @@ jobs:
       run: |
         echo "签到任务执行完成"
         echo "时间: $(Get-Date)"
+
+    - name: Send DingTalk Notification
+      if: always()
+      env:
+        DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      run: |
+        # 注意：当前运行器是 windows-2025，但 run 用的是 PowerShell（非 bash）
+        # 因此不能直接使用 date +%s%3N 或 openssl 等 Linux 命令！
+        # 需要改用 PowerShell 脚本实现钉钉加签
+        $status = "${{ job.status }}"
+        $timestamp = [int64](([datetime]::UtcNow - [datetime]::UnixEpoch).TotalMilliseconds)
+        $secret = "${{ secrets.DINGTALK_SECRET }}"
+
+        # 生成签名：HMAC-SHA256
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($secret)
+        $signData = "$timestamp\n$secret"
+        $signBytes = [System.Text.Encoding]::UTF8.GetBytes($signData)
+        $hash = $hmac.ComputeHash($signBytes)
+        $signature = [Convert]::ToBase64String($hash)
+
+        # URL 编码签名（钉钉要求）
+        $signatureEncoded = [System.Web.HttpUtility]::UrlEncode($signature)
+
+        # 构建消息
+        if ($status -eq "success") {
+            $message = "✅ AnyRouter 签到成功！"
+        } else {
+            $message = "❌ AnyRouter 签到失败，请检查配置！"
+        }
+
+        $text = "## 📌 AnyRouter 自动签到`n$message`n`n> 触发时间: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))`n`n> Job 状态: $status"
+        $json = @{
+            msgtype = "markdown"
+            markdown = @{
+                title = "AnyRouter 签到通知"
+                text = $text
+            }
+        } | ConvertTo-Json -Depth 3
+
+        # 发送请求
+        $webhookUrl = "${{ secrets.DINGTALK_WEBHOOK }}&timestamp=$timestamp&sign=$signatureEncoded"
+        Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $json -ContentType 'application/json'
