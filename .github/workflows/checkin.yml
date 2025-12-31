@@ -97,38 +97,28 @@ jobs:
         echo "签到任务执行完成"
         echo "时间: $(Get-Date)"
 
-    - name: Send DingTalk Notification
+    - name: 钉钉通知 (AnyRouter)
       if: always()
       env:
-        DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
+        DINGDING_SECRET: ${{ secrets.DINGDING_SECRET }}
       run: |
-        # 注意：当前运行器是 windows-2025，但 run 用的是 PowerShell（非 bash）
-        # 因此不能直接使用 date +%s%3N 或 openssl 等 Linux 命令！
-        # 需要改用 PowerShell 脚本实现钉钉加签
+        # PowerShell 脚本 - 兼容 Windows 环境
         $status = "${{ job.status }}"
         $timestamp = [int64](([datetime]::UtcNow - [datetime]::UnixEpoch).TotalMilliseconds)
-        $secret = "${{ secrets.DINGTALK_SECRET }}"
+        $webhookUrl = "${{ secrets.DINGDING_WEBHOOK }}"
+        $secret = "${{ secrets.DINGDING_SECRET }}"
 
-        # 生成签名：HMAC-SHA256
-        $hmac = New-Object System.Security.Cryptography.HMACSHA256
-        $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($secret)
-        $signData = "$timestamp\n$secret"
-        $signBytes = [System.Text.Encoding]::UTF8.GetBytes($signData)
-        $hash = $hmac.ComputeHash($signBytes)
-        $signature = [Convert]::ToBase64String($hash)
-
-        # URL 编码签名（钉钉要求）
-        $signatureEncoded = [System.Web.HttpUtility]::UrlEncode($signature)
-
-        # 构建消息
+        # 消息内容（包含关键词 "AnyRouter" 通过钉钉验证）
         if ($status -eq "success") {
             $message = "✅ AnyRouter 签到成功！"
+            $color = "info"
         } else {
             $message = "❌ AnyRouter 签到失败，请检查配置！"
+            $color = "warning"
         }
 
-        $text = "## 📌 AnyRouter 自动签到`n$message`n`n> 触发时间: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))`n`n> Job 状态: $status"
+        $text = "## 📌 AnyRouter 自动签到`n${message}`n`n> **触发时间**: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))`n> **Job 状态**: ${status}`n> **运行器**: windows-2025"
         $json = @{
             msgtype = "markdown"
             markdown = @{
@@ -137,6 +127,34 @@ jobs:
             }
         } | ConvertTo-Json -Depth 3
 
-        # 发送请求
-        $webhookUrl = "${{ secrets.DINGTALK_WEBHOOK }}&timestamp=$timestamp&sign=$signatureEncoded"
-        Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $json -ContentType 'application/json'
+        # 如果配置了加签密钥，则计算签名
+        if ($secret -and $secret -ne "") {
+            try {
+                $hmac = New-Object System.Security.Cryptography.HMACSHA256
+                $hmac.Key = [System.Text.Encoding]::UTF8.GetBytes($secret)
+                $signData = "${timestamp}\n${secret}"
+                $signBytes = [System.Text.Encoding]::UTF8.GetBytes($signData)
+                $hash = $hmac.ComputeHash($signBytes)
+                $signature = [Convert]::ToBase64String($hash)
+                $signatureEncoded = [System.Web.HttpUtility]::UrlEncode($signature)
+                $webhookUrl = "${webhookUrl}&timestamp=${timestamp}&sign=${signatureEncoded}"
+                Write-Output "✅ 已启用钉钉加签验证"
+            } catch {
+                Write-Warning "⚠️ 加签计算失败，将使用普通模式: $_"
+            }
+        } else {
+            Write-Output "ℹ️ 未配置 DINGDING_SECRET，使用普通模式发送通知"
+        }
+
+        # 发送通知
+        try {
+            $headers = @{
+                "Content-Type" = "application/json"
+            }
+            $response = Invoke-RestMethod -Uri $webhookUrl -Method Post -Headers $headers -Body $json
+            Write-Output "✅ 钉钉通知发送成功: $($response | ConvertTo-Json)"
+        } catch {
+            Write-Error "❌ 钉钉通知失败: $($_.Exception.Response.StatusCode.value__)"
+            Write-Error "响应内容: $($_.ErrorDetails.Message)"
+            exit 1
+        }
